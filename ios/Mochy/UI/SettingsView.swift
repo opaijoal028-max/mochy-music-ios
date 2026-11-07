@@ -16,6 +16,7 @@ struct SettingsView: View {
                     playbackSection
                     appearanceSection
                     playerSection
+                    contentSection
                     downloadsSection
                     integrationsSection
                     aboutSection
@@ -27,6 +28,9 @@ struct SettingsView: View {
             .background(palette.background)
             .navigationDestination(for: AppRoute.self) { route in
                 RouteDestination(route: route)
+            }
+            .navigationDestination(item: $store.navigationRequest) { request in
+                RouteDestination(route: request.route)
             }
             .sheet(isPresented: $showSleepTimer) {
                 SleepTimerSheet()
@@ -128,13 +132,33 @@ struct SettingsView: View {
                     .tint(palette.accent)
             }
             divider
+            settingsRow("Resume on Bluetooth") {
+                Toggle("", isOn: $store.settings.resumeOnBluetooth)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
+            settingsRow("Stream timeout") {
+                HStack(spacing: 10) {
+                    Slider(value: $store.settings.streamFailureTimeout, in: 5...30, step: 1)
+                        .tint(palette.accent)
+                        .frame(width: 120)
+                    Text("\(Int(store.settings.streamFailureTimeout))s")
+                        .font(MochyFont.medium(12))
+                        .foregroundStyle(palette.secondaryText)
+                        .frame(width: 28, alignment: .trailing)
+                }
+            }
+            divider
             settingsRow("Sleep timer") {
                 Button {
                     showSleepTimer = true
                 } label: {
-                    Text(sleepTimerLabel)
-                        .font(MochyFont.medium(12))
-                        .foregroundStyle(palette.secondaryText)
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        Text(sleepTimerLabel)
+                            .font(MochyFont.medium(12))
+                            .foregroundStyle(palette.secondaryText)
+                    }
                 }
                 .buttonStyle(.plain)
             }
@@ -204,6 +228,26 @@ struct SettingsView: View {
                     .tint(palette.accent)
             }
             divider
+            settingsRow("Blurred player backdrop") {
+                Toggle("", isOn: $store.settings.blurEnabled)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            if store.settings.blurEnabled {
+                divider
+                settingsRow("Progressive blur") {
+                    Toggle("", isOn: $store.settings.progressiveBlur)
+                        .labelsHidden()
+                        .tint(palette.accent)
+                }
+            }
+            divider
+            settingsRow("Show explicit marks") {
+                Toggle("", isOn: $store.settings.showExplicit)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
             settingsRow("Home style") {
                 menuPicker(selection: $store.settings.homeStyle, options: HomeStyle.allCases, label: \.rawValue)
             }
@@ -246,6 +290,36 @@ struct SettingsView: View {
                 menuPicker(selection: $store.settings.defaultTab, options: AppTab.allCases, label: \.rawValue)
             }
             divider
+            settingsRow("Hide player artwork") {
+                Toggle("", isOn: $store.settings.hidePlayerThumbnail)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
+            settingsRow("Crop album art") {
+                Toggle("", isOn: $store.settings.cropAlbumArt)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
+            settingsRow("Swipe down to close player") {
+                Toggle("", isOn: $store.settings.playerSwipeDown)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
+            settingsRow("Hide status bar in player") {
+                Toggle("", isOn: $store.settings.hideStatusBarInPlayer)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
+            settingsRow("Remember queue") {
+                Toggle("", isOn: $store.settings.persistentQueue)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
             settingsRow("Swipe right") {
                 menuPicker(selection: $store.settings.swipeRight, options: SwipeAction.allCases, label: \.rawValue)
             }
@@ -264,10 +338,61 @@ struct SettingsView: View {
         }
     }
 
+    private var contentSection: some View {
+        settingsGroup("Content") {
+            settingsRow("Show video songs") {
+                Toggle("", isOn: $store.settings.showVideoSongs)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            divider
+            settingsRow("Content language") {
+                stringMenu(
+                    selection: $store.settings.contentLanguage,
+                    options: [
+                        ("en", "English"), ("es", "Español"), ("pt", "Português"),
+                        ("fr", "Français"), ("de", "Deutsch"), ("it", "Italiano"),
+                        ("ja", "日本語"), ("ko", "한국어"), ("hi", "हिन्दी"),
+                        ("ar", "العربية"), ("ru", "Русский"), ("tr", "Türkçe"),
+                        ("id", "Bahasa Indonesia")
+                    ]
+                )
+            }
+            divider
+            settingsRow("Content region") {
+                stringMenu(
+                    selection: $store.settings.contentRegion,
+                    options: [
+                        ("US", "United States"), ("GB", "United Kingdom"), ("CA", "Canada"),
+                        ("AU", "Australia"), ("DE", "Germany"), ("FR", "France"),
+                        ("ES", "Spain"), ("IT", "Italy"), ("BR", "Brazil"),
+                        ("MX", "Mexico"), ("IN", "India"), ("JP", "Japan"),
+                        ("KR", "South Korea"), ("ID", "Indonesia"), ("TR", "Türkiye")
+                    ]
+                )
+            }
+        }
+    }
+
     private var downloadsSection: some View {
         settingsGroup("Downloads") {
             settingsRow("Download quality") {
                 menuPicker(selection: $store.settings.downloadQuality, options: DownloadQuality.allCases, label: \.rawValue)
+            }
+            divider
+            settingsRow("Auto-download liked") {
+                Toggle("", isOn: $store.settings.autoDownloadLiked)
+                    .labelsHidden()
+                    .tint(palette.accent)
+            }
+            if !store.activeDownloads.isEmpty || !store.failedDownloads.isEmpty {
+                divider
+                HStack {
+                    Text("\(store.activeDownloads.count) downloading · \(store.failedDownloads.count) failed")
+                        .font(MochyFont.medium(12))
+                        .foregroundStyle(palette.secondaryText)
+                    Spacer()
+                }
             }
             divider
             NavigationLink(value: AppRoute.downloads) {
@@ -428,6 +553,27 @@ struct SettingsView: View {
             }
         } label: {
             Text(selection.wrappedValue[keyPath: label])
+                .font(MochyFont.medium(12))
+                .foregroundStyle(palette.secondaryText)
+        }
+    }
+
+    private func stringMenu(selection: Binding<String>, options: [(String, String)]) -> some View {
+        Menu {
+            ForEach(options.indices, id: \.self) { index in
+                let option = options[index]
+                Button {
+                    selection.wrappedValue = option.0
+                } label: {
+                    if selection.wrappedValue == option.0 {
+                        Label(option.1, systemImage: "checkmark")
+                    } else {
+                        Text(option.1)
+                    }
+                }
+            }
+        } label: {
+            Text(options.first { $0.0 == selection.wrappedValue }?.1 ?? selection.wrappedValue)
                 .font(MochyFont.medium(12))
                 .foregroundStyle(palette.secondaryText)
         }

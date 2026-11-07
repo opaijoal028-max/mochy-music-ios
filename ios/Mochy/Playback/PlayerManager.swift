@@ -32,11 +32,13 @@ final class PlayerManager: ObservableObject {
     var onSongStarted: ((Song) -> Void)?
     var localURLProvider: ((Song) -> URL?)?
     var onQueueEnded: (() -> Void)?
+    var onQueueChanged: (([Song], Int) -> Void)?
 
     private var originalQueue: [Song] = []
     private var loadTask: Task<Void, Never>?
     private var artworkTask: Task<Void, Never>?
     private var sleepTask: Task<Void, Never>?
+    private var streamWatchdog: Task<Void, Never>?
     private var timeObserver: Any?
     private var itemStatusObservation: NSKeyValueObservation?
     private var itemEndObserver: NSObjectProtocol?
@@ -45,7 +47,12 @@ final class PlayerManager: ObservableObject {
     private var wasPlayingBeforeInterruption = false
     private var audioQuality: AudioQuality = .high
     private var mixWithOthers = false
+    private var resumeOnBluetooth = true
+    private var streamFailureTimeout = 10.0
     private var didConfigureSession = false
+    private var shouldAutoplay = true
+    private var pendingSeek: Double?
+    private var didAutoRetry = false
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
@@ -76,6 +83,7 @@ final class PlayerManager: ObservableObject {
             currentIndex = queue.firstIndex(where: { $0.id == song.id }) ?? 0
         }
         startCurrentSong(record: true)
+        notifyQueueChanged()
     }
 
     func play(songs: [Song], startingAt index: Int) {
@@ -91,6 +99,7 @@ final class PlayerManager: ObservableObject {
         let insertIndex = min(currentIndex + 1, queue.count)
         queue.insert(song, at: insertIndex)
         originalQueue = queue
+        notifyQueueChanged()
     }
 
     func addToQueue(_ songs: [Song]) {
@@ -99,9 +108,10 @@ final class PlayerManager: ObservableObject {
         originalQueue = queue
         if currentSong == nil, let first = queue.first {
             currentIndex = 0
-            startCurrentSong(record: true)
             _ = first
+            startCurrentSong(record: true)
         }
+        notifyQueueChanged()
     }
 
     func removeFromQueue(at offsets: IndexSet) {
@@ -117,6 +127,23 @@ final class PlayerManager: ObservableObject {
         } else if let song = currentSong, queue.indices.contains(currentIndex), queue[currentIndex].id != song.id {
             startCurrentSong(record: false)
         }
+        notifyQueueChanged()
+    }
+
+    func removeFromQueue(_ song: Song) {
+        guard let index = queue.firstIndex(where: { $0.id == song.id }) else { return }
+        removeFromQueue(at: IndexSet(integer: index))
+    }
+
+    func clearUpNext() {
+        guard !queue.isEmpty else { return }
+        guard currentSong != nil, queue.indices.contains(currentIndex) else {
+            stop()
+            return
+        }
+        queue = Array(queue.prefix(currentIndex + 1))
+        originalQueue = queue
+        notifyQueueChanged()
     }
 
     func moveQueue(from source: IndexSet, to destination: Int) {
@@ -125,12 +152,14 @@ final class PlayerManager: ObservableObject {
         if let song = currentSong, let index = queue.firstIndex(where: { $0.id == song.id }) {
             currentIndex = index
         }
+        notifyQueueChanged()
     }
 
     func jumpToQueueItem(_ index: Int) {
         guard queue.indices.contains(index) else { return }
         currentIndex = index
         startCurrentSong(record: true)
+        notifyQueueChanged()
     }
 
     func next(userInitiated: Bool = true) {
@@ -182,6 +211,10 @@ final class PlayerManager: ObservableObject {
     func resume() {
         guard currentSong != nil else { return }
         configureSession()
+        if duration > 0, currentTime >= duration - 0.25 {
+            seek(to: 0)
+        }
+        shouldAutoplay = true
         player.play()
         isPlaying = true
         updateNowPlayingElapsed()
@@ -189,6 +222,7 @@ final class PlayerManager: ObservableObject {
 
     func pause() {
         player.pause()
+        shouldAutoplay = false
         isPlaying = false
         updateNowPlayingElapsed()
     }
@@ -208,7 +242,10 @@ final class PlayerManager: ObservableObject {
         isBuffering = false
         artworkImage = nil
         artworkColor = nil
+        streamWatchdog?.cancel()
+        pendingSeek = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        notifyQueueChanged()
     }
 
     func seek(to time: Double) {
@@ -246,6 +283,7 @@ final class PlayerManager: ObservableObject {
                 currentIndex = 0
             }
         }
+        notifyQueueChanged()
     }
 
     func cycleRepeatMode() {
@@ -260,6 +298,8 @@ final class PlayerManager: ObservableObject {
 
     func updateSettings(_ settings: AppSettings) {
         audioQuality = settings.audioQuality
+        resumeOnBluetooth = settings.resumeOnBluetooth
+        streamFailureTimeout = max(3, settings.streamFailureTimeout)
         if mixWithOthers != settings.mixWithOtherApps {
             mixWithOthers = settings.mixWithOtherApps
             configureSession()
@@ -286,11 +326,34 @@ final class PlayerManager: ObservableObject {
 
     // MARK: - Playback loading
 
-    private func startCurrentSong(record: Bool) {
+    func restore(queue songs: [Song], index: Int, time: Double) {
+        guard songs.indices.contains(index) else { return }
+        queue = songs
+        originalQueue = songs
+        currentIndex = index
+        startCurrentSong(record: false, autoplay: false, seekTo: max(0, time))
+        notifyQueueChanged()
+    }
+
+    func retry() {
+        guard currentSong != nil else { return }
+        didAutoRetry = false
+        startCurrentSong(record: false)
+    }
+
+    private func startCurrentSong(record: Bool, autoplay: Bool = true, seekTo: Double? = nil) {
         guard queue.indices.contains(currentIndex) else { return }
         let song = queue[currentIndex]
+        if currentSong?.id != song.id {
+            didAutoRetry = false
+            pendingSeek = nil
+        }
+        if let seekTo {
+            pendingSeek = seekTo
+        }
         currentSong = song
-        currentTime = 0
+        shouldAutoplay = autoplay
+        currentTime = seekTo ?? 0
         duration = Double(song.duration ?? 0)
         errorMessage = nil
         isLoading = true
@@ -299,6 +362,18 @@ final class PlayerManager: ObservableObject {
         updateNowPlayingMetadata()
         if record {
             onSongStarted?(song)
+        }
+        notifyQueueChanged()
+
+        streamWatchdog?.cancel()
+        streamWatchdog = Task { [weak self] in
+            guard let self else { return }
+            let delay = UInt64(max(3, self.streamFailureTimeout) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            guard self.currentSong?.id == song.id, self.isLoading, !self.didAutoRetry else { return }
+            self.didAutoRetry = true
+            self.startCurrentSong(record: false, autoplay: self.shouldAutoplay)
         }
 
         loadTask?.cancel()
@@ -321,6 +396,12 @@ final class PlayerManager: ObservableObject {
                 )
             } catch {
                 guard !Task.isCancelled else { return }
+                if !self.didAutoRetry {
+                    self.didAutoRetry = true
+                    self.startCurrentSong(record: false, autoplay: self.shouldAutoplay)
+                    return
+                }
+                self.streamWatchdog?.cancel()
                 self.isLoading = false
                 self.isPlaying = false
                 self.errorMessage = error.localizedDescription
@@ -354,15 +435,37 @@ final class PlayerManager: ObservableObject {
                 guard let self else { return }
                 switch item.status {
                 case .readyToPlay:
+                    self.streamWatchdog?.cancel()
                     self.isLoading = false
                     let seconds = item.duration.seconds
                     if seconds.isFinite, seconds > 0 {
                         self.duration = seconds
                     }
-                    self.player.play()
-                    self.isPlaying = true
+                    if let pending = self.pendingSeek {
+                        self.pendingSeek = nil
+                        let target = self.duration > 0 ? min(pending, self.duration) : pending
+                        self.currentTime = target
+                        self.player.seek(
+                            to: CMTime(seconds: target, preferredTimescale: 600),
+                            toleranceBefore: .zero,
+                            toleranceAfter: .zero
+                        )
+                    }
+                    if self.shouldAutoplay {
+                        self.player.play()
+                        self.isPlaying = true
+                    } else {
+                        self.player.pause()
+                        self.isPlaying = false
+                    }
                     self.updateNowPlayingElapsed()
                 case .failed:
+                    self.streamWatchdog?.cancel()
+                    if !self.didAutoRetry {
+                        self.didAutoRetry = true
+                        self.startCurrentSong(record: false, autoplay: self.shouldAutoplay)
+                        return
+                    }
                     self.isLoading = false
                     self.isPlaying = false
                     self.errorMessage = item.error?.localizedDescription ?? "Playback failed."
@@ -508,9 +611,21 @@ final class PlayerManager: ObservableObject {
                       let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
                 if reason == .oldDeviceUnavailable {
                     self.pause()
+                } else if reason == .newDeviceAvailable, self.resumeOnBluetooth, self.currentSong != nil {
+                    let bluetoothPorts: Set<AVAudioSession.Port> = [.bluetoothA2DP, .bluetoothHFP, .bluetoothLE]
+                    let connected = AVAudioSession.sharedInstance().currentRoute.outputs.contains {
+                        bluetoothPorts.contains($0.portType)
+                    }
+                    if connected {
+                        self.resume()
+                    }
                 }
             }
         }
+    }
+
+    private func notifyQueueChanged() {
+        onQueueChanged?(queue, currentIndex)
     }
 
     // MARK: - Now Playing / remote commands

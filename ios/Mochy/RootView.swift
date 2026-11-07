@@ -3,6 +3,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var player: PlayerManager
+    @Environment(\.scenePhase) private var scenePhase
 
     private var palette: MochyPalette {
         MochyTheme.palette(settings: store.settings, artworkColor: player.artworkColor)
@@ -54,13 +55,28 @@ struct RootView: View {
             }
         }
         .fullScreenCover(isPresented: $store.playerPresented) {
-            PlayerScreen()
-                .environmentObject(store)
-                .environmentObject(store.player)
-                .environment(\.mochyPalette, palette)
+            NavigationStack {
+                PlayerScreen()
+            }
+            .environment(\.openRouteAction, { (route: AppRoute) in
+                store.playerRoute = route
+            })
+            .statusBar(hidden: store.settings.hideStatusBarInPlayer)
+            .onDisappear {
+                store.playerRoute = nil
+            }
+            .environmentObject(store)
+            .environmentObject(store.player)
+            .environment(\.mochyPalette, palette)
         }
         .task {
             await store.loadHome()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            store.handleScenePhase(phase)
+        }
+        .onChange(of: store.selectedTab) { _, _ in
+            store.navigationRequest = nil
         }
     }
 }

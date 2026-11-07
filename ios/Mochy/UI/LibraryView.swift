@@ -36,6 +36,9 @@ struct LibraryView: View {
             .navigationDestination(for: AppRoute.self) { route in
                 RouteDestination(route: route)
             }
+            .navigationDestination(item: $store.navigationRequest) { request in
+                RouteDestination(route: request.route)
+            }
             .sheet(isPresented: $showCreatePlaylist) {
                 CreatePlaylistSheet()
                     .environmentObject(store)

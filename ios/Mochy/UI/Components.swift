@@ -3,6 +3,22 @@ import UIKit
 
 // MARK: - Routes
 
+private struct OpenRouteActionKey: EnvironmentKey {
+    static let defaultValue: ((AppRoute) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var openRouteAction: ((AppRoute) -> Void)? {
+        get { self[OpenRouteActionKey.self] }
+        set { self[OpenRouteActionKey.self] = newValue }
+    }
+}
+
+struct NavigationRequest: Hashable {
+    var route: AppRoute
+    var token = UUID()
+}
+
 enum AppRoute: Hashable {
     case album(id: String, playlistId: String?)
     case playlist(id: String)
@@ -14,6 +30,7 @@ enum AppRoute: Hashable {
     case stats
     case profile
     case songs(title: String, songs: [Song])
+    case browse(id: String, title: String, params: String?)
 }
 
 extension MediaItem {
@@ -48,6 +65,7 @@ struct RemoteArtwork: View {
     var symbol: String = "music.note"
     var aspectRatio: CGFloat? = 1
     var isCircle = false
+    var crop = true
 
     @State private var image: UIImage?
     @State private var isLoading = false
@@ -81,7 +99,7 @@ struct RemoteArtwork: View {
             if let image {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: crop ? .fill : .fit)
                     .transition(.opacity)
             }
         }
@@ -126,6 +144,7 @@ struct SectionHeader: View {
     var title: String
     var subtitle: String?
     var actionTitle: String?
+    var destination: AppRoute?
     var action: (() -> Void)?
 
     var body: some View {
@@ -141,12 +160,20 @@ struct SectionHeader: View {
                 }
             }
             Spacer()
-            if let actionTitle, let action {
+            if let destination {
+                NavigationLink(value: destination) {
+                    Text(actionTitle ?? "More")
+                        .font(MochyFont.semibold(13))
+                        .foregroundStyle(palette.secondaryText)
+                }
+                .buttonStyle(.plain)
+            } else if let actionTitle, let action {
                 Button(action: action) {
                     Text(actionTitle)
                         .font(MochyFont.semibold(13))
                         .foregroundStyle(palette.secondaryText)
                 }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -220,76 +247,167 @@ struct SongRow: View {
     var contextSongs: [Song]?
 
     @State private var showAddToPlaylist = false
+    @State private var swipeOffset: CGFloat = 0
 
     var body: some View {
-        HStack(spacing: 12) {
-            if let index {
-                Text("\(index + 1)")
-                    .font(MochyFont.medium(13))
-                    .foregroundStyle(palette.tertiaryText)
-                    .frame(width: 24, alignment: .trailing)
+        ZStack {
+            if swipeOffset != 0 {
+                swipeBackground
             }
-            if showArtwork {
-                RemoteArtwork(url: song.thumbnail, cornerRadius: 9)
-                    .frame(width: 50, height: 50)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(song.title)
-                        .font(MochyFont.semibold(15))
-                        .foregroundStyle(highlighted ? palette.accent : palette.text)
-                        .lineLimit(1)
-                    if song.explicit {
-                        Text("E")
-                            .font(MochyFont.bold(8))
-                            .foregroundStyle(palette.background)
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 2)
-                            .background(Color.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 2))
-                    }
+            HStack(spacing: 12) {
+                if let index {
+                    Text("\(index + 1)")
+                        .font(MochyFont.medium(13))
+                        .foregroundStyle(palette.tertiaryText)
+                        .frame(width: 24, alignment: .trailing)
                 }
-                HStack(spacing: 5) {
-                    if song.isVideoSong {
-                        Image(systemName: "play.rectangle.fill")
-                            .font(.system(size: 9))
-                    }
-                    Text(song.artistLine.isEmpty ? "Unknown artist" : song.artistLine)
-                        .lineLimit(1)
+                if showArtwork {
+                    RemoteArtwork(url: song.thumbnail, cornerRadius: 9)
+                        .frame(width: 50, height: 50)
                 }
-                .font(MochyFont.regular(12))
-                .foregroundStyle(palette.secondaryText)
-            }
-            Spacer(minLength: 6)
-            if showDuration, !song.durationText.isEmpty {
-                Text(song.durationText)
-                    .font(MochyFont.medium(11))
-                    .foregroundStyle(palette.tertiaryText)
-            }
-            Menu {
-                SongActionsContent(song: song, onAddToPlaylist: { showAddToPlaylist = true })
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 16, weight: .semibold))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(song.title)
+                            .font(MochyFont.semibold(15))
+                            .foregroundStyle(highlighted ? palette.accent : palette.text)
+                            .lineLimit(1)
+                        if song.explicit, store.settings.showExplicit {
+                            Text("E")
+                                .font(MochyFont.bold(8))
+                                .foregroundStyle(palette.background)
+                                .padding(.horizontal, 3)
+                                .padding(.vertical, 2)
+                                .background(Color.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 2))
+                        }
+                    }
+                    HStack(spacing: 5) {
+                        if song.isVideoSong {
+                            Image(systemName: "play.rectangle.fill")
+                                .font(.system(size: 9))
+                        }
+                        Text(song.artistLine.isEmpty ? "Unknown artist" : song.artistLine)
+                            .lineLimit(1)
+                        if store.isDownloading(song) {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(palette.accent)
+                        }
+                    }
+                    .font(MochyFont.regular(12))
                     .foregroundStyle(palette.secondaryText)
-                    .frame(width: 30, height: 38)
-                    .contentShape(Rectangle())
+                }
+                Spacer(minLength: 6)
+                if showDuration, !song.durationText.isEmpty {
+                    Text(song.durationText)
+                        .font(MochyFont.medium(11))
+                        .foregroundStyle(palette.tertiaryText)
+                }
+                Menu {
+                    SongActionsContent(song: song, onAddToPlaylist: { showAddToPlaylist = true })
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(palette.secondaryText)
+                        .frame(width: 30, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-        }
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            store.play(song, queue: contextSongs ?? [song])
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+            .offset(x: swipeOffset)
+            .onTapGesture {
+                store.play(song, queue: contextSongs ?? [song])
+            }
+            .simultaneousGesture(swipeGesture)
         }
         .sheet(isPresented: $showAddToPlaylist) {
             AddToPlaylistSheet(song: song)
                 .environmentObject(store)
         }
     }
+
+    private var swipeGesture: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { value in
+                guard abs(value.translation.width) > abs(value.translation.height) * 1.35 else { return }
+                swipeOffset = max(-126, min(126, value.translation.width))
+            }
+            .onEnded { _ in
+                let offset = swipeOffset
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    swipeOffset = 0
+                }
+                guard abs(offset) > 64 else { return }
+                performSwipe(offset > 0 ? store.settings.swipeRight : store.settings.swipeLeft)
+            }
+    }
+
+    private func performSwipe(_ action: SwipeAction) {
+        switch action {
+        case .like:
+            store.toggleLike(song)
+        case .queue:
+            store.queue(song)
+        case .download:
+            if store.isDownloaded(song) {
+                if let download = store.downloads.first(where: { $0.song.id == song.id }) {
+                    store.deleteDownload(download)
+                }
+            } else if store.isDownloading(song) {
+                store.cancelDownload(song)
+            } else {
+                store.download(song)
+            }
+        case .playlist:
+            showAddToPlaylist = true
+        case .none:
+            break
+        }
+    }
+
+    @ViewBuilder
+    private var swipeBackground: some View {
+        let action = swipeOffset > 0 ? store.settings.swipeRight : store.settings.swipeLeft
+        HStack(spacing: 0) {
+            if swipeOffset > 0 {
+                swipeBadge(action)
+                Spacer(minLength: 0)
+            } else {
+                Spacer(minLength: 0)
+                swipeBadge(action)
+            }
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private func swipeBadge(_ action: SwipeAction) -> some View {
+        let tint: Color
+        let icon: String
+        switch action {
+        case .like: tint = Color(hex: "#F06A6A"); icon = store.isLiked(song) ? "heart.fill" : "heart"
+        case .queue: tint = palette.accent; icon = "text.badge.plus"
+        case .download: tint = Color(hex: "#6FA8FF"); icon = "arrow.down.circle"
+        case .playlist: tint = Color(hex: "#77D97A"); icon = "music.note.list"
+        case .none: tint = palette.elevated; icon = "minus"
+        }
+        return VStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+            Text(action.rawValue)
+                .font(MochyFont.medium(9))
+                .lineLimit(1)
+        }
+        .foregroundStyle(action == .none ? palette.secondaryText : Color.white)
+        .frame(width: 92)
+        .frame(maxHeight: .infinity)
+        .background(tint.opacity(action == .none ? 0.3 : 0.9), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
 }
 
 struct SongActionsContent: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openRouteAction) private var openRouteAction
     var song: Song
     var onAddToPlaylist: (() -> Void)?
 
@@ -310,12 +428,16 @@ struct SongActionsContent: View {
             Label("Add to queue", systemImage: "text.badge.plus")
         }
         if let albumId = song.albumId {
-            NavigationLink(value: AppRoute.album(id: albumId, playlistId: song.playlistId)) {
+            Button {
+                open(.album(id: albumId, playlistId: song.playlistId))
+            } label: {
                 Label("Go to album", systemImage: "square.stack")
             }
         }
         if let artist = song.artists.first, let id = artist.id {
-            NavigationLink(value: AppRoute.artist(id: id)) {
+            Button {
+                open(.artist(id: id))
+            } label: {
                 Label("Go to artist", systemImage: "person")
             }
         }
@@ -324,16 +446,34 @@ struct SongActionsContent: View {
                 if let download = store.downloads.first(where: { $0.song.id == song.id }) {
                     store.deleteDownload(download)
                 }
+            } else if store.isDownloading(song) {
+                store.cancelDownload(song)
             } else {
                 store.download(song)
             }
         } label: {
-            Label(store.isDownloaded(song) ? "Remove download" : "Download", systemImage: store.isDownloaded(song) ? "trash" : "arrow.down.circle")
+            Label(
+                store.isDownloaded(song) ? "Remove download" : (store.isDownloading(song) ? "Cancel download" : "Download"),
+                systemImage: store.isDownloaded(song) ? "trash" : "arrow.down.circle"
+            )
         }
         if let onAddToPlaylist {
             Button(action: onAddToPlaylist) {
                 Label("Add to playlist", systemImage: "music.note.list")
             }
+        }
+        if let url = song.shareURL {
+            ShareLink(item: url) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+        }
+    }
+
+    private func open(_ route: AppRoute) {
+        if let openRouteAction {
+            openRouteAction(route)
+        } else {
+            store.openRoute(route)
         }
     }
 }
@@ -361,20 +501,31 @@ struct MiniPlayerBar: View {
                     RemoteArtwork(url: song.thumbnail, cornerRadius: 8)
                         .frame(width: 42, height: 42)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(song.title)
-                            .font(MochyFont.semibold(13))
-                            .foregroundStyle(palette.text)
-                            .lineLimit(1)
-                        Text(song.artistLine)
+                        HStack(spacing: 5) {
+                            Text(song.title)
+                                .font(MochyFont.semibold(13))
+                                .foregroundStyle(palette.text)
+                                .lineLimit(1)
+                            if player.errorMessage != nil {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(Color(hex: "#F2D35C"))
+                            }
+                        }
+                        Text(player.errorMessage == nil ? song.artistLine : "Playback error · tap to retry")
                             .font(MochyFont.regular(11))
-                            .foregroundStyle(palette.secondaryText)
+                            .foregroundStyle(player.errorMessage == nil ? palette.secondaryText : Color(hex: "#F2D35C"))
                             .lineLimit(1)
                     }
                     Spacer(minLength: 4)
                     Button {
-                        player.togglePlayPause()
+                        if player.errorMessage != nil {
+                            player.retry()
+                        } else {
+                            player.togglePlayPause()
+                        }
                     } label: {
-                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        Image(systemName: player.errorMessage != nil ? "arrow.clockwise" : (player.isPlaying ? "pause.fill" : "play.fill"))
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(palette.text)
                             .frame(width: 38, height: 38)
@@ -391,7 +542,7 @@ struct MiniPlayerBar: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
-            .background(palette.isPureBlack ? Color.black : palette.surface)
+            .background(store.settings.pureBlackMiniPlayer ? Color.black : palette.surface)
             .overlay(alignment: .top) {
                 Rectangle().fill(Color.white.opacity(0.06)).frame(height: 0.5)
             }
@@ -399,6 +550,14 @@ struct MiniPlayerBar: View {
             .onTapGesture {
                 store.playerPresented = true
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 18)
+                    .onEnded { value in
+                        guard value.translation.height < -36,
+                              abs(value.translation.height) > abs(value.translation.width) else { return }
+                        store.playerPresented = true
+                    }
+            )
         }
     }
 }

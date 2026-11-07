@@ -27,6 +27,8 @@ struct RouteDestination: View {
             ProfileView()
         case .songs(let title, let songs):
             SongsListView(title: title, songs: songs)
+        case .browse(let id, let title, let params):
+            BrowseView(browseId: id, title: title, params: params)
         }
     }
 }
@@ -47,33 +49,32 @@ struct CollectionHeader: View {
     var songs: [Song]
     var extraMenu: AnyView?
 
+    private var artCorner: CGFloat {
+        isCircle ? 999 : min(store.settings.coverRadius, 40)
+    }
+
     var body: some View {
-        VStack(spacing: 14) {
-            RemoteArtwork(
-                url: artwork,
-                cornerRadius: 22,
-                aspectRatio: nil,
-                isCircle: isCircle
-            )
-            .frame(width: 218, height: 218)
-            .shadow(color: .black.opacity(0.35), radius: 28, y: 16)
-
-            VStack(spacing: 5) {
-                Text(eyebrow.uppercased())
-                    .font(MochyFont.semibold(9))
-                    .tracking(1.5)
-                    .foregroundStyle(palette.secondaryText)
-                Text(title)
-                    .font(MochyFont.bold(26))
-                    .foregroundStyle(palette.text)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                Text(subtitle)
-                    .font(MochyFont.medium(12))
-                    .foregroundStyle(palette.secondaryText)
-                    .multilineTextAlignment(.center)
+        Group {
+            switch store.settings.playlistStyle {
+            case .flow:
+                flowLayout
+            case .classic:
+                classicLayout
+            case .minimal:
+                minimalLayout
             }
+        }
+        .frame(maxWidth: .infinity)
+    }
 
+    private var flowLayout: some View {
+        VStack(spacing: 14) {
+            artworkView(size: 218)
+            VStack(spacing: 5) {
+                eyebrowView
+                titleView(alignment: .center, size: 26)
+                subtitleView(alignment: .center)
+            }
             if let description, !description.isEmpty {
                 Text(description)
                     .font(MochyFont.regular(12))
@@ -82,64 +83,169 @@ struct CollectionHeader: View {
                     .lineLimit(3)
                     .padding(.horizontal, 8)
             }
-
-            HStack(spacing: 10) {
-                Button {
-                    guard !songs.isEmpty else { return }
-                    store.player.setShuffle(false)
-                    store.play(songs, startingAt: 0)
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 13, weight: .bold))
-                        Text("Play")
-                            .font(MochyFont.semibold(14))
-                    }
-                    .foregroundStyle(palette.accentText)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-                    .background(palette.accent, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(songs.isEmpty)
-                .opacity(songs.isEmpty ? 0.45 : 1)
-
-                Button {
-                    guard !songs.isEmpty else { return }
-                    store.player.setShuffle(true)
-                    store.play(songs, startingAt: Int.random(in: 0..<songs.count))
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "shuffle")
-                            .font(.system(size: 13, weight: .bold))
-                        Text("Shuffle")
-                            .font(MochyFont.semibold(14))
-                    }
-                    .foregroundStyle(palette.text)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-                    .background(Color.white.opacity(0.08), in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.6))
-                }
-                .buttonStyle(.plain)
-                .disabled(songs.isEmpty)
-                .opacity(songs.isEmpty ? 0.45 : 1)
-
-                if let extraMenu {
-                    Menu {
-                        extraMenu
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(palette.text)
-                            .frame(width: 44, height: 44)
-                            .background(Color.white.opacity(0.08), in: Circle())
-                    }
-                }
-            }
-            .padding(.horizontal, 6)
+            actions(fullWidth: true)
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    private var classicLayout: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .bottom, spacing: 16) {
+                artworkView(size: 172)
+                VStack(alignment: .leading, spacing: 5) {
+                    eyebrowView
+                    titleView(alignment: .leading, size: 24)
+                    subtitleView(alignment: .leading)
+                    if let description, !description.isEmpty {
+                        Text(description)
+                            .font(MochyFont.regular(11))
+                            .foregroundStyle(palette.secondaryText)
+                            .lineLimit(2)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            actions(fullWidth: true)
+        }
+    }
+
+    private var minimalLayout: some View {
+        HStack(alignment: .top, spacing: 14) {
+            artworkView(size: 92)
+            VStack(alignment: .leading, spacing: 4) {
+                eyebrowView
+                titleView(alignment: .leading, size: 19)
+                subtitleView(alignment: .leading)
+                HStack(spacing: 8) {
+                    compactButton(icon: "play.fill", filled: true) {
+                        playAll(shuffle: false)
+                    }
+                    compactButton(icon: "shuffle", filled: false) {
+                        playAll(shuffle: true)
+                    }
+                    if extraMenu != nil {
+                        menuButton
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func artworkView(size: CGFloat) -> some View {
+        RemoteArtwork(
+            url: artwork,
+            cornerRadius: artCorner,
+            aspectRatio: nil,
+            isCircle: isCircle,
+            crop: store.settings.cropAlbumArt
+        )
+        .frame(width: size, height: size)
+        .shadow(color: .black.opacity(0.35), radius: size > 140 ? 28 : 14, y: size > 140 ? 16 : 8)
+    }
+
+    private var eyebrowView: some View {
+        Text(eyebrow.uppercased())
+            .font(MochyFont.semibold(9))
+            .tracking(1.5)
+            .foregroundStyle(palette.secondaryText)
+    }
+
+    private func titleView(alignment: TextAlignment, size: CGFloat) -> some View {
+        Text(title)
+            .font(MochyFont.bold(size))
+            .foregroundStyle(palette.text)
+            .multilineTextAlignment(alignment)
+            .lineLimit(2)
+    }
+
+    private func subtitleView(alignment: TextAlignment) -> some View {
+        Text(subtitle)
+            .font(MochyFont.medium(12))
+            .foregroundStyle(palette.secondaryText)
+            .multilineTextAlignment(alignment)
+    }
+
+    private func actions(fullWidth: Bool) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                playAll(shuffle: false)
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 13, weight: .bold))
+                    Text("Play")
+                        .font(MochyFont.semibold(14))
+                }
+                .foregroundStyle(palette.accentText)
+                .frame(maxWidth: fullWidth ? .infinity : nil)
+                .padding(.horizontal, fullWidth ? 0 : 18)
+                .frame(height: 44)
+                .background(palette.accent, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(songs.isEmpty)
+            .opacity(songs.isEmpty ? 0.45 : 1)
+
+            Button {
+                playAll(shuffle: true)
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "shuffle")
+                        .font(.system(size: 13, weight: .bold))
+                    Text("Shuffle")
+                        .font(MochyFont.semibold(14))
+                }
+                .foregroundStyle(palette.text)
+                .frame(maxWidth: fullWidth ? .infinity : nil)
+                .padding(.horizontal, fullWidth ? 0 : 18)
+                .frame(height: 44)
+                .background(Color.white.opacity(0.08), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.6))
+            }
+            .buttonStyle(.plain)
+            .disabled(songs.isEmpty)
+            .opacity(songs.isEmpty ? 0.45 : 1)
+
+            if extraMenu != nil {
+                menuButton
+            }
+        }
+        .padding(.horizontal, fullWidth ? 6 : 0)
+    }
+
+    private var menuButton: some View {
+        Menu {
+            if let extraMenu {
+                extraMenu
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(palette.text)
+                .frame(width: 44, height: 44)
+                .background(Color.white.opacity(0.08), in: Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func compactButton(icon: String, filled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(filled ? palette.accentText : palette.text)
+                .frame(width: 34, height: 34)
+                .background(filled ? palette.accent : Color.white.opacity(0.08), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(songs.isEmpty)
+        .opacity(songs.isEmpty ? 0.45 : 1)
+    }
+
+    private func playAll(shuffle: Bool) {
+        guard !songs.isEmpty else { return }
+        store.player.setShuffle(shuffle)
+        store.play(songs, startingAt: shuffle ? Int.random(in: 0..<songs.count) : 0)
     }
 }
 
@@ -227,7 +333,9 @@ struct AlbumDetailView: View {
                 Label("Download album", systemImage: "arrow.down.circle")
             }
             if let album = detail?.album, let id = album.artists.first?.id {
-                NavigationLink(value: AppRoute.artist(id: id)) {
+                Button {
+                    store.openRoute(.artist(id: id))
+                } label: {
                     Label("Go to artist", systemImage: "person")
                 }
             }
@@ -260,6 +368,10 @@ struct PlaylistDetailView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
 
+    private var visibleSongs: [Song] {
+        (detail?.songs ?? []).filter { store.settings.showVideoSongs || !$0.isVideoSong }
+    }
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 20) {
@@ -281,18 +393,18 @@ struct PlaylistDetailView: View {
                         subtitle: subtitle(detail),
                         description: detail.description,
                         artwork: detail.playlist.thumbnail,
-                        songs: detail.songs,
-                        extraMenu: AnyView(downloadMenu(songs: detail.songs))
+                        songs: visibleSongs,
+                        extraMenu: AnyView(downloadMenu(songs: visibleSongs))
                     )
                     .padding(.bottom, 4)
 
                     LazyVStack(spacing: 1) {
-                        ForEach(Array(detail.songs.enumerated()), id: \.element.id) { index, song in
+                        ForEach(Array(visibleSongs.enumerated()), id: \.element.id) { index, song in
                             SongRow(
                                 song: song,
                                 index: index,
                                 showDuration: true,
-                                contextSongs: detail.songs
+                                contextSongs: visibleSongs
                             )
                             Divider().overlay(palette.separator).padding(.leading, 62)
                         }
@@ -312,7 +424,7 @@ struct PlaylistDetailView: View {
 
     private func subtitle(_ detail: PlaylistDetail) -> String {
         var pieces = [detail.playlist.author]
-        if !detail.songs.isEmpty { pieces.append("\(detail.songs.count) songs") }
+        if !visibleSongs.isEmpty { pieces.append("\(visibleSongs.count) songs") }
         return pieces.joined(separator: " · ")
     }
 
@@ -350,8 +462,21 @@ struct ArtistDetailView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
 
+    private var visibleSections: [HomeSection] {
+        (detail?.sections ?? []).compactMap { section in
+            var copy = section
+            copy.items = section.items.filter { item in
+                guard case .song(let song) = item else { return true }
+                if !store.settings.showVideoSongs, song.isVideoSong { return false }
+                if !store.settings.showExplicit, song.explicit { return false }
+                return true
+            }
+            return copy.items.isEmpty ? nil : copy
+        }
+    }
+
     private var allSongs: [Song] {
-        detail?.sections.flatMap { $0.items.compactMap(\.song) } ?? []
+        visibleSections.flatMap { $0.items.compactMap(\.song) }
     }
 
     var body: some View {
@@ -379,7 +504,7 @@ struct ArtistDetailView: View {
                         songs: allSongs
                     )
 
-                    ForEach(detail.sections) { section in
+                    ForEach(visibleSections) { section in
                         if let songs = sectionSongs(section), !songs.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
                                 SectionHeader(title: section.title)
@@ -694,7 +819,86 @@ struct DownloadsManageView: View {
                     }
                 }
 
-                if store.downloads.isEmpty {
+                if !store.activeDownloads.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Downloading")
+                            .font(MochyFont.semibold(11))
+                            .tracking(0.8)
+                            .foregroundStyle(palette.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(store.activeDownloads) { song in
+                            HStack(spacing: 12) {
+                                RemoteArtwork(url: song.thumbnail, cornerRadius: 10)
+                                    .frame(width: 46, height: 46)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(song.title)
+                                        .font(MochyFont.medium(13))
+                                        .foregroundStyle(palette.text)
+                                        .lineLimit(1)
+                                    Text(song.artistLine)
+                                        .font(MochyFont.regular(11))
+                                        .foregroundStyle(palette.secondaryText)
+                                        .lineLimit(1)
+                                    ProgressView(value: store.downloadProgress[song.id] ?? 0)
+                                        .tint(palette.accent)
+                                }
+                                Button {
+                                    store.cancelDownload(song)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 19))
+                                        .foregroundStyle(palette.secondaryText)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .mochyCard(radius: 14, padding: 10)
+                        }
+                    }
+                }
+
+                if !store.failedDownloads.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Failed")
+                            .font(MochyFont.semibold(11))
+                            .tracking(0.8)
+                            .foregroundStyle(Color(hex: "#F06A6A"))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(store.failedDownloads) { song in
+                            HStack(spacing: 12) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Color(hex: "#F2D35C"))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(song.title)
+                                        .font(MochyFont.medium(13))
+                                        .foregroundStyle(palette.text)
+                                        .lineLimit(1)
+                                    Text(store.downloadErrors[song.id] ?? "Download failed")
+                                        .font(MochyFont.regular(10))
+                                        .foregroundStyle(palette.secondaryText)
+                                        .lineLimit(2)
+                                }
+                                Spacer(minLength: 4)
+                                Button("Retry") {
+                                    store.download(song)
+                                }
+                                .font(MochyFont.semibold(11))
+                                .foregroundStyle(palette.accent)
+                                Button {
+                                    store.clearDownloadFailure(song)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(palette.secondaryText)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .mochyCard(radius: 14, padding: 10)
+                        }
+                    }
+                }
+
+                if store.downloads.isEmpty && store.activeDownloads.isEmpty && store.failedDownloads.isEmpty {
                     EmptyStateView(
                         icon: "arrow.down.circle",
                         title: "No downloads yet",
@@ -1060,5 +1264,120 @@ struct SongsListView: View {
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(palette.background, for: .navigationBar)
+    }
+}
+
+// MARK: - Browse collection
+
+struct BrowseView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.mochyPalette) private var palette
+
+    var browseId: String
+    var title: String
+    var params: String?
+
+    @State private var page: HomePage?
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+
+    private var sections: [HomeSection] {
+        (page?.sections ?? []).compactMap { section in
+            var copy = section
+            copy.items = section.items.filter { item in
+                guard case .song(let song) = item else { return true }
+                if !store.settings.showVideoSongs, song.isVideoSong { return false }
+                if !store.settings.showExplicit, song.explicit { return false }
+                return true
+            }
+            return copy.items.isEmpty ? nil : copy
+        }
+    }
+
+    var body: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 22) {
+                if isLoading {
+                    ProgressView().tint(palette.accent).padding(.top, 120).frame(maxWidth: .infinity)
+                } else if let errorMessage {
+                    EmptyStateView(
+                        icon: "exclamationmark.circle",
+                        title: "Couldn't load this page",
+                        message: errorMessage,
+                        actionTitle: "Retry"
+                    ) {
+                        Task { await load() }
+                    }
+                } else if sections.isEmpty {
+                    EmptyStateView(
+                        icon: "music.note",
+                        title: "Nothing here yet",
+                        message: "This collection is empty right now."
+                    )
+                } else {
+                    ForEach(sections) { section in
+                        sectionBlock(section)
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 8)
+            .padding(.bottom, 40)
+        }
+        .background(palette.background)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(palette.background, for: .navigationBar)
+        .task { await load() }
+    }
+
+    private func moreRoute(_ section: HomeSection) -> AppRoute? {
+        guard let id = section.moreId, id != "FEmusic_moods_and_genres" else { return nil }
+        return .browse(id: id, title: section.title, params: section.moreParams)
+    }
+
+    @ViewBuilder
+    private func sectionBlock(_ section: HomeSection) -> some View {
+        let songs = section.items.compactMap(\.song)
+        if songs.count == section.items.count, !songs.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                SectionHeader(
+                    title: section.title,
+                    subtitle: section.subtitle,
+                    destination: moreRoute(section)
+                )
+                ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
+                    SongRow(song: song, index: index, contextSongs: songs)
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                SectionHeader(
+                    title: section.title,
+                    subtitle: section.subtitle,
+                    destination: moreRoute(section)
+                )
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(section.items) { item in
+                            MediaCard(item: item, width: 148, contextSongs: songs)
+                        }
+                    }
+                }
+                .padding(.horizontal, -18)
+                .contentMargins(.horizontal, 18)
+            }
+        }
+    }
+
+    private func load() async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            page = try await InnerTubeAPI.shared.browse(id: browseId, params: params)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
     }
 }

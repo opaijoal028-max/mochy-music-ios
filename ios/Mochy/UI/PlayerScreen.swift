@@ -19,6 +19,9 @@ struct PlayerScreen: View {
             if let song = player.currentSong {
                 VStack(spacing: 0) {
                     topBar(song)
+                    if let message = player.errorMessage {
+                        errorBanner(message)
+                    }
                     content(song)
                 }
             } else {
@@ -64,6 +67,12 @@ struct PlayerScreen: View {
                 .presentationDetents([.height(330)])
                 .presentationDragIndicator(.visible)
         }
+        .navigationDestination(item: $store.playerRoute) { route in
+            RouteDestination(route: route)
+        }
+        .navigationDestination(for: AppRoute.self) { route in
+            RouteDestination(route: route)
+        }
     }
 
     // MARK: - Chrome
@@ -71,12 +80,12 @@ struct PlayerScreen: View {
     private var background: some View {
         ZStack {
             palette.background
-            if let image = player.artworkImage {
+            if let image = player.artworkImage, store.settings.blurEnabled {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
                     .blur(radius: 70)
-                    .opacity(0.4)
+                    .opacity(store.settings.progressiveBlur ? 0.4 : 0.25)
                     .ignoresSafeArea()
                 LinearGradient(
                     colors: [palette.background.opacity(0.35), palette.background.opacity(0.82), palette.background],
@@ -95,6 +104,39 @@ struct PlayerScreen: View {
                 .ignoresSafeArea()
             }
         }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Color(hex: "#F2D35C"))
+            Text(message)
+                .font(MochyFont.medium(11))
+                .foregroundStyle(palette.text.opacity(0.86))
+                .lineLimit(2)
+            Spacer(minLength: 6)
+            Button {
+                player.retry()
+            } label: {
+                Text("Retry")
+                    .font(MochyFont.semibold(11))
+                    .foregroundStyle(palette.accentText)
+                    .padding(.horizontal, 12)
+                    .frame(height: 28)
+                    .background(palette.accent, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Color(hex: "#F2D35C").opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color(hex: "#F2D35C").opacity(0.22), lineWidth: 0.6)
+        )
+        .padding(.horizontal, 18)
+        .padding(.top, 6)
     }
 
     private func topBar(_ song: Song) -> some View {
@@ -154,6 +196,26 @@ struct PlayerScreen: View {
                     showQueue = true
                 } label: {
                     Label("Queue", systemImage: "list.bullet")
+                }
+                if let albumId = song.albumId {
+                    Divider()
+                    Button {
+                        store.playerRoute = .album(id: albumId, playlistId: song.playlistId)
+                    } label: {
+                        Label("Go to album", systemImage: "square.stack")
+                    }
+                }
+                if let artist = song.artists.first, let id = artist.id {
+                    Button {
+                        store.playerRoute = .artist(id: id)
+                    } label: {
+                        Label("Go to artist", systemImage: "person")
+                    }
+                }
+                if let url = song.shareURL {
+                    ShareLink(item: url) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -320,19 +382,90 @@ struct PlayerScreen: View {
 
     // MARK: - iPod
 
+    private struct IpodColors {
+        var body: [Color]
+        var screen: Color
+        var ink: Color
+        var wheel: Color
+    }
+
+    private func ipodColors(_ theme: IpodTheme) -> IpodColors {
+        switch theme {
+        case .silver:
+            return IpodColors(
+                body: [Color(hex: "#F4F2EC"), Color(hex: "#C9C6BC")],
+                screen: Color(hex: "#D9D7CF"),
+                ink: .black,
+                wheel: Color(hex: "#EEECE5")
+            )
+        case .black:
+            return IpodColors(
+                body: [Color(hex: "#2B2B2E"), Color(hex: "#0C0C0E")],
+                screen: Color(hex: "#D9D7CF"),
+                ink: .black,
+                wheel: Color(hex: "#171719")
+            )
+        case .u2:
+            return IpodColors(
+                body: [Color(hex: "#242426"), Color(hex: "#050506")],
+                screen: Color(hex: "#D9D7CF"),
+                ink: .black,
+                wheel: Color(hex: "#8E2D2D")
+            )
+        case .trueDark:
+            return IpodColors(
+                body: [Color(hex: "#0E0E10"), Color.black],
+                screen: Color(hex: "#101012"),
+                ink: Color.white.opacity(0.88),
+                wheel: Color(hex: "#101012")
+            )
+        }
+    }
+
+    private func ipodWheelColor(theme: IpodTheme) -> Color {
+        switch store.settings.ipodWheelColor {
+        case .theme: return ipodColors(theme).wheel
+        case .white: return Color(hex: "#EEECE5")
+        case .black: return Color(hex: "#171719")
+        case .red: return Color(hex: "#8E2D2D")
+        }
+    }
+
+    private func isDarkColor(_ color: Color) -> Bool {
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.4
+    }
+
     private func ipod(_ song: Song) -> some View {
         GeometryReader { proxy in
             let scale = min(1, proxy.size.height / 590)
+            let theme = store.settings.ipodTheme
+            let colors = ipodColors(theme)
+            let bodyColors = colors.body
+            let screenColor = colors.screen
+            let ink = colors.ink
+            let wheel = ipodWheelColor(theme: theme)
+            let wheelIsDark = isDarkColor(wheel)
+            let wheelInk = wheelIsDark ? Color.white.opacity(0.68) : Color.black.opacity(0.6)
+            let centerColor = wheelIsDark
+                ? (store.settings.ipodWheelColor == .red || theme == .u2 ? Color(hex: "#1A1A1C") : Color(hex: "#252528"))
+                : Color(hex: "#F7F5EE")
+            let secondaryInk = ink.opacity(0.62)
+
             VStack {
                 Spacer(minLength: 0)
                 VStack(spacing: 14) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(hex: "#D9D7CF"))
+                            .fill(screenColor)
                             .aspectRatio(1.35, contentMode: .fit)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(Color.black.opacity(0.2), lineWidth: 1)
+                                    .strokeBorder(ink.opacity(0.2), lineWidth: 1)
                             )
                         HStack(spacing: 12) {
                             RemoteArtwork(url: song.thumbnail, cornerRadius: 4)
@@ -340,18 +473,18 @@ struct PlayerScreen: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(song.title)
                                     .font(.system(size: 14, weight: .bold))
-                                    .foregroundStyle(.black)
+                                    .foregroundStyle(ink)
                                     .lineLimit(2)
                                 Text(song.artistLine)
                                     .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(.black.opacity(0.62))
+                                    .foregroundStyle(secondaryInk)
                                     .lineLimit(1)
                                 Spacer()
                                 Text("\(TimeFormat.clock(player.currentTime)) / \(TimeFormat.clock(player.duration))")
                                     .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(.black.opacity(0.55))
+                                    .foregroundStyle(ink.opacity(0.55))
                                 ProgressView(value: player.duration > 0 ? min(player.currentTime / player.duration, 1) : 0)
-                                    .tint(.black.opacity(0.7))
+                                    .tint(ink.opacity(0.7))
                             }
                         }
                         .padding(14)
@@ -360,35 +493,31 @@ struct PlayerScreen: View {
 
                     ZStack {
                         Circle()
-                            .fill(
-                                store.settings.ipodWheelColor == .red
-                                    ? Color(hex: "#8E2D2D")
-                                    : Color(hex: "#EEECE5")
-                            )
+                            .fill(wheel)
                         Circle()
-                            .strokeBorder(Color.black.opacity(0.12), lineWidth: 1)
+                            .strokeBorder(ink.opacity(0.12), lineWidth: 1)
                         Text("MENU")
                             .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.black.opacity(0.6))
+                            .foregroundStyle(wheelInk)
                             .offset(y: -74)
                         Button { player.previous() } label: {
                             Image(systemName: "backward.fill")
                                 .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.black.opacity(0.6))
+                                .foregroundStyle(wheelInk)
                                 .offset(x: -74)
                         }
                         .buttonStyle(.plain)
                         Button { player.next() } label: {
                             Image(systemName: "forward.fill")
                                 .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.black.opacity(0.6))
+                                .foregroundStyle(wheelInk)
                                 .offset(x: 74)
                         }
                         .buttonStyle(.plain)
                         Button { player.togglePlayPause() } label: {
                             Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.black.opacity(0.6))
+                                .foregroundStyle(wheelInk)
                                 .offset(y: 74)
                         }
                         .buttonStyle(.plain)
@@ -396,9 +525,9 @@ struct PlayerScreen: View {
                             player.togglePlayPause()
                         } label: {
                             Circle()
-                                .fill(Color(hex: "#F7F5EE"))
+                                .fill(centerColor)
                                 .frame(width: 74, height: 74)
-                                .overlay(Circle().strokeBorder(Color.black.opacity(0.12), lineWidth: 1))
+                                .overlay(Circle().strokeBorder(ink.opacity(0.12), lineWidth: 1))
                         }
                         .buttonStyle(.plain)
                     }
@@ -409,16 +538,18 @@ struct PlayerScreen: View {
                     RoundedRectangle(cornerRadius: 34, style: .continuous)
                         .fill(
                             LinearGradient(
-                                colors: store.settings.ipodTheme == .black
-                                    ? [Color(hex: "#232323"), Color(hex: "#0E0E0E")]
-                                    : [Color(hex: "#F2F0E9"), Color(hex: "#C9C6BC")],
+                                colors: bodyColors,
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 34, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
+                                .strokeBorder(
+                                    theme == .trueDark || theme == .black || theme == .u2
+                                        ? Color.white.opacity(0.12) : Color.white.opacity(0.3),
+                                    lineWidth: 0.6
+                                )
                         )
                         .shadow(color: .black.opacity(0.4), radius: 24, y: 14)
                 )
@@ -588,19 +719,43 @@ struct PlayerScreen: View {
 
     // MARK: - Shared pieces
 
+    @ViewBuilder
     private func artwork(_ song: Song, size: CGFloat, radius: CGFloat) -> some View {
-        RemoteArtwork(url: song.thumbnail, cornerRadius: radius, aspectRatio: nil)
-            .frame(width: size, height: size)
-            .shadow(color: .black.opacity(0.4), radius: 30, y: 18)
-            .overlay {
-                if player.isLoading {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .fill(Color.black.opacity(0.25))
-                        LoadingDots()
-                    }
+        Group {
+            if store.settings.hidePlayerThumbnail {
+                ZStack {
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [palette.elevated, palette.surface, palette.background],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Text("M")
+                        .font(MochyFont.black(size * 0.28))
+                        .foregroundStyle(palette.text.opacity(0.16))
+                }
+            } else {
+                RemoteArtwork(
+                    url: song.thumbnail,
+                    cornerRadius: radius,
+                    aspectRatio: nil,
+                    crop: store.settings.cropAlbumArt
+                )
+            }
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .black.opacity(0.4), radius: 30, y: 18)
+        .overlay {
+            if player.isLoading {
+                ZStack {
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(Color.black.opacity(0.25))
+                    LoadingDots()
                 }
             }
+        }
     }
 
     private func titleBlock(_ song: Song, alignment: HorizontalAlignment, titleSize: CGFloat = 25) -> some View {

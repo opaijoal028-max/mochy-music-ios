@@ -67,6 +67,10 @@ struct Song: Codable, Hashable, Identifiable {
         musicVideoType == "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK"
     }
 
+    var shareURL: URL? {
+        URL(string: "https://music.youtube.com/watch?v=\(id)")
+    }
+
     static func timeText(_ seconds: Int) -> String {
         let seconds = max(0, seconds)
         let hours = seconds / 3600
@@ -190,6 +194,7 @@ struct HomeSection: Identifiable, Hashable {
     var subtitle: String?
     var items: [MediaItem]
     var moreId: String?
+    var moreParams: String?
 }
 
 struct SearchGroup: Identifiable, Hashable {
@@ -198,8 +203,17 @@ struct SearchGroup: Identifiable, Hashable {
     var items: [MediaItem]
 }
 
+struct HomeChip: Identifiable, Hashable {
+    var title: String
+    var browseId: String?
+    var params: String?
+
+    var id: String { "\(title)-\(browseId ?? "")-\(params ?? "")" }
+    var isBrowsable: Bool { browseId != nil || params != nil }
+}
+
 struct HomePage {
-    var chips: [String]
+    var chips: [HomeChip]
     var sections: [HomeSection]
 }
 
@@ -400,7 +414,7 @@ enum AppTab: String, Codable, CaseIterable, Identifiable, Hashable {
         case .home: return "house"
         case .search: return "magnifyingglass"
         case .library: return "books.vertical"
-        case .settings: return "slider.horizontal.3"
+        case .settings: return "m.circle"
         }
     }
 
@@ -409,7 +423,7 @@ enum AppTab: String, Codable, CaseIterable, Identifiable, Hashable {
         case .home: return "house.fill"
         case .search: return "magnifyingglass"
         case .library: return "books.vertical.fill"
-        case .settings: return "slider.horizontal.3"
+        case .settings: return "m.circle.fill"
         }
     }
 }

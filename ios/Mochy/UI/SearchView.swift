@@ -42,6 +42,9 @@ struct SearchView: View {
             .navigationDestination(for: AppRoute.self) { route in
                 RouteDestination(route: route)
             }
+            .navigationDestination(item: $store.navigationRequest) { request in
+                RouteDestination(route: request.route)
+            }
             .task(id: query) {
                 await queryChanged()
             }
@@ -52,6 +55,11 @@ struct SearchView: View {
             }
             .onAppear {
                 recentSearches = UserDefaults.standard.stringArray(forKey: "mochy.recentSearches") ?? []
+            }
+            .onChange(of: store.settings.showVideoSongs) { _, enabled in
+                if !enabled, filter == .videos {
+                    filter = .all
+                }
             }
         }
     }
@@ -115,10 +123,14 @@ struct SearchView: View {
         .animation(.easeOut(duration: 0.2), value: focused)
     }
 
+    private var filterOptions: [SearchFilter] {
+        store.settings.showVideoSongs ? SearchFilter.allCases : SearchFilter.allCases.filter { $0 != .videos }
+    }
+
     private var filterBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(SearchFilter.allCases) { option in
+                ForEach(filterOptions) { option in
                     Button {
                         filter = option
                     } label: {
@@ -199,6 +211,7 @@ struct SearchView: View {
             query = term
             hasSearched = true
             focused = false
+            saveRecent(term)
             Task { await runSearch() }
         } label: {
             ZStack(alignment: .bottomLeading) {
@@ -256,7 +269,7 @@ struct SearchView: View {
 
     @ViewBuilder
     private var resultContent: some View {
-        if isSearching && results.isEmpty {
+        if isSearching && visibleResults.isEmpty {
             HStack {
                 Spacer()
                 LoadingDots()
@@ -272,7 +285,7 @@ struct SearchView: View {
             ) {
                 Task { await runSearch() }
             }
-        } else if results.isEmpty && hasSearched {
+        } else if visibleResults.isEmpty && hasSearched {
             EmptyStateView(
                 icon: "magnifyingglass",
                 title: "No results",
@@ -296,7 +309,7 @@ struct SearchView: View {
 
     private var allResults: some View {
         VStack(alignment: .leading, spacing: 24) {
-            if let first = results.first {
+            if let first = visibleResults.first {
                 SectionHeader(title: "Top result")
                 topResultCard(first)
             }
@@ -305,7 +318,7 @@ struct SearchView: View {
                     SectionHeader(title: "Songs")
                     ForEach(Array(songs.prefix(4))) { item in
                         if let song = item.song {
-                            SongRow(song: song, contextSongs: results.compactMap(\.song))
+                            SongRow(song: song, contextSongs: visibleResults.compactMap(\.song))
                         }
                     }
                 }
@@ -315,7 +328,7 @@ struct SearchView: View {
                     SectionHeader(title: "Videos")
                     ForEach(Array(videos.prefix(3))) { item in
                         if let song = item.song {
-                            SongRow(song: song, contextSongs: results.compactMap(\.song))
+                            SongRow(song: song, contextSongs: visibleResults.compactMap(\.song))
                         }
                     }
                 }
@@ -369,7 +382,7 @@ struct SearchView: View {
         Group {
             if let song = item.song {
                 Button {
-                    store.play(song, queue: results.compactMap(\.song))
+                    store.play(song, queue: visibleResults.compactMap(\.song))
                 } label: {
                     topCardContent(item)
                 }
@@ -451,11 +464,20 @@ struct SearchView: View {
         }
     }
 
-    private var songs: [MediaItem] { results.filter { $0.song != nil && $0.song?.isVideoSong != true } }
-    private var videos: [MediaItem] { results.filter { $0.song?.isVideoSong == true } }
-    private var albums: [MediaItem] { results.filter { $0.album != nil } }
-    private var artists: [MediaItem] { results.filter { $0.artist != nil } }
-    private var playlists: [MediaItem] { results.filter { $0.playlist != nil } }
+    private var visibleResults: [MediaItem] {
+        results.filter { item in
+            guard case .song(let song) = item else { return true }
+            if !store.settings.showVideoSongs, song.isVideoSong { return false }
+            if !store.settings.showExplicit, song.explicit { return false }
+            return true
+        }
+    }
+
+    private var songs: [MediaItem] { visibleResults.filter { $0.song != nil && $0.song?.isVideoSong != true } }
+    private var videos: [MediaItem] { visibleResults.filter { $0.song?.isVideoSong == true } }
+    private var albums: [MediaItem] { visibleResults.filter { $0.album != nil } }
+    private var artists: [MediaItem] { visibleResults.filter { $0.artist != nil } }
+    private var playlists: [MediaItem] { visibleResults.filter { $0.playlist != nil } }
 
     private func queryChanged() async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -488,8 +510,14 @@ struct SearchView: View {
         do {
             let found = try await InnerTubeAPI.shared.search(query: trimmed, filter: filter)
             guard !Task.isCancelled else { return }
+            let visible = found.filter { item in
+                guard case .song(let song) = item else { return true }
+                if !store.settings.showVideoSongs, song.isVideoSong { return false }
+                if !store.settings.showExplicit, song.explicit { return false }
+                return true
+            }
             withAnimation(.easeOut(duration: 0.2)) {
-                results = found
+                results = visible
             }
         } catch {
             errorMessage = error.localizedDescription

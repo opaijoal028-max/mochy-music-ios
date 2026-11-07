@@ -47,6 +47,109 @@ private struct LibrarySnapshot: Codable {
     var playEvents: [PlayEvent]
 }
 
+private struct QueueSnapshot: Codable {
+    var songs: [Song]
+    var index: Int
+    var time: Double
+    var shuffle: Bool
+    var repeatRaw: String
+}
+
+// MARK: - File downloader
+
+final class FileDownloader: NSObject, URLSessionDownloadDelegate {
+    private let destination: URL
+    private let progressHandler: (Double) -> Void
+    private let completion: (Result<Int64, Error>) -> Void
+    private var session: URLSession?
+    private var task: URLSessionDownloadTask?
+    private var finished = false
+
+    init(
+        destination: URL,
+        progress: @escaping (Double) -> Void,
+        completion: @escaping (Result<Int64, Error>) -> Void
+    ) {
+        self.destination = destination
+        self.progressHandler = progress
+        self.completion = completion
+    }
+
+    func start(_ request: URLRequest) {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 3_600
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        self.session = session
+        let task = session.downloadTask(with: request)
+        self.task = task
+        task.resume()
+    }
+
+    func cancel() {
+        task?.cancel()
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    private func finish(_ result: Result<Int64, Error>) {
+        guard !finished else { return }
+        finished = true
+        session?.finishTasksAndInvalidate()
+        session = nil
+        completion(result)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        var expected = totalBytesExpectedToWrite
+        if expected <= 0 {
+            expected = downloadTask.response?.expectedContentLength ?? 0
+        }
+        guard expected > 0 else { return }
+        progressHandler(min(1, max(0, Double(totalBytesWritten) / Double(expected))))
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        if let http = downloadTask.response as? HTTPURLResponse,
+           !(200..<300).contains(http.statusCode) {
+            finish(.failure(URLError(.badServerResponse)))
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: location, to: destination)
+            let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path)
+            let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+            guard size > 0 else {
+                try? FileManager.default.removeItem(at: destination)
+                finish(.failure(URLError(.zeroByteResource)))
+                return
+            }
+            finish(.success(size))
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(.failure(error))
+        }
+    }
+}
+
 struct ArtistStat: Identifiable {
     var id: String { name }
     var name: String
@@ -68,6 +171,14 @@ final class AppStore: ObservableObject {
         didSet {
             saveSettings()
             player.updateSettings(settings)
+            InnerTubeAPI.shared.configure(settings: settings)
+            if !settings.persistentQueue {
+                UserDefaults.standard.removeObject(forKey: Self.queueSnapshotKey)
+            }
+            if oldValue.contentLanguage != settings.contentLanguage
+                || oldValue.contentRegion != settings.contentRegion {
+                Task { await refreshHome() }
+            }
         }
     }
 
@@ -78,6 +189,8 @@ final class AppStore: ObservableObject {
     @Published var homeLoading = false
     @Published var homeError: String?
     @Published var playerPresented = false
+    @Published var navigationRequest: NavigationRequest?
+    @Published var playerRoute: AppRoute?
     @Published var libraryPath = NavigationPath()
 
     @Published var likedSongs: [Song] = []
@@ -88,13 +201,17 @@ final class AppStore: ObservableObject {
 
     @Published var downloadProgress: [String: Double] = [:]
     @Published var downloadErrors: [String: String] = [:]
+    @Published var downloadCandidates: [String: Song] = [:]
 
     @Published var toast: String?
 
-    private var downloadTasks: [String: Task<Void, Never>] = [:]
+    private var downloaders: [String: FileDownloader] = [:]
+    private var downloadTokens: [String: UUID] = [:]
     private var toastTask: Task<Void, Never>?
     private var activePlayEventIndex: Int?
     private var activePlayStartedAt: Date?
+
+    private static let queueSnapshotKey = "mochy.queueSnapshot"
 
     init() {
         let loaded = Self.loadSettings()
@@ -102,6 +219,7 @@ final class AppStore: ObservableObject {
         selectedTab = loaded.defaultTab
         MochyFiles.prepare()
         loadLibrary()
+        InnerTubeAPI.shared.configure(settings: loaded)
 
         player.updateSettings(loaded)
         player.localURLProvider = { [weak self] song in
@@ -112,7 +230,12 @@ final class AppStore: ObservableObject {
         }
         player.onQueueEnded = { [weak self] in
             self?.finishActivePlayEvent()
+            self?.saveQueueSnapshot()
         }
+        player.onQueueChanged = { [weak self] _, _ in
+            self?.saveQueueSnapshot()
+        }
+        restoreQueueIfNeeded()
     }
 
     // MARK: - Home
@@ -133,6 +256,49 @@ final class AppStore: ObservableObject {
 
     func refreshHome() async {
         await loadHome(force: true)
+    }
+
+    // MARK: - Queue persistence
+
+    func saveQueueSnapshot() {
+        guard settings.persistentQueue,
+              player.currentSong != nil,
+              !player.queue.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: Self.queueSnapshotKey)
+            return
+        }
+        let snapshot = QueueSnapshot(
+            songs: player.queue,
+            index: player.currentIndex,
+            time: player.currentTime,
+            shuffle: player.shuffle,
+            repeatRaw: player.repeatMode.rawValue
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults.standard.set(data, forKey: Self.queueSnapshotKey)
+    }
+
+    private func restoreQueueIfNeeded() {
+        guard settings.persistentQueue,
+              let data = UserDefaults.standard.data(forKey: Self.queueSnapshotKey),
+              let snapshot = try? JSONDecoder().decode(QueueSnapshot.self, from: data),
+              !snapshot.songs.isEmpty else { return }
+        player.shuffle = snapshot.shuffle
+        player.repeatMode = RepeatMode(rawValue: snapshot.repeatRaw) ?? .off
+        player.restore(queue: snapshot.songs, index: snapshot.index, time: snapshot.time)
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        if phase == .background {
+            finishActivePlayEvent()
+        }
+        if phase != .active {
+            saveQueueSnapshot()
+        }
+    }
+
+    func openRoute(_ route: AppRoute) {
+        navigationRequest = NavigationRequest(route: route)
     }
 
     // MARK: - Playback helpers
@@ -359,60 +525,118 @@ final class AppStore: ObservableObject {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    func download(_ song: Song) {
-        guard !isDownloaded(song), downloadTasks[song.id] == nil else { return }
-        downloadErrors[song.id] = nil
-        downloadProgress[song.id] = 0.05
+    func isDownloading(_ song: Song) -> Bool {
+        downloaders[song.id] != nil || downloadProgress[song.id] != nil
+    }
 
-        let task = Task { [weak self] in
+    var activeDownloads: [Song] {
+        downloadProgress.keys.compactMap { downloadCandidates[$0] }
+            .sorted { ($0.artistLine + $0.title) < ($1.artistLine + $1.title) }
+    }
+
+    var failedDownloads: [Song] {
+        downloadErrors.keys.compactMap { downloadCandidates[$0] }
+    }
+
+    func download(_ song: Song) {
+        guard !isDownloaded(song), !isDownloading(song) else { return }
+        downloadErrors[song.id] = nil
+        downloadCandidates[song.id] = song
+        downloadProgress[song.id] = 0.05
+        let token = UUID()
+        downloadTokens[song.id] = token
+
+        Task { [weak self] in
             guard let self else { return }
             do {
                 let quality = AudioQuality(rawValue: self.settings.downloadQuality.rawValue) ?? .high
                 let source = try await InnerTubeAPI.shared.stream(videoId: song.id, quality: quality)
-                self.downloadProgress[song.id] = 0.25
+                guard !Task.isCancelled, self.downloadCandidates[song.id] != nil else { return }
+                guard source.mimeType.contains("mp4") else {
+                    throw InnerTubeError.unavailable("This track has no downloadable AAC stream on iOS. Try another track.")
+                }
                 var request = URLRequest(url: source.url)
                 for (key, value) in source.headers {
                     request.setValue(value, forHTTPHeaderField: key)
                 }
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                    throw URLError(.badServerResponse)
-                }
-                guard !data.isEmpty else { throw URLError(.zeroByteResource) }
-
                 MochyFiles.prepare()
-                let ext = source.mimeType.contains("mp4") ? "m4a" : "webm"
+                let ext = "m4a"
                 let base = self.sanitizedFileName("\(song.artistLine) - \(song.title)")
                 let fileName = "\(base)-\(song.id).\(ext)"
                 let url = MochyFiles.downloadsDirectory.appendingPathComponent(fileName)
-                try data.write(to: url, options: .atomic)
+                self.downloadProgress[song.id] = 0.12
 
-                let download = Download(
-                    song: song,
-                    fileName: fileName,
-                    quality: self.settings.downloadQuality.rawValue,
-                    bytes: Int64(data.count),
-                    createdAt: Date()
+                let downloader = FileDownloader(
+                    destination: url,
+                    progress: { [weak self] fraction in
+                        Task { @MainActor in
+                            guard let self,
+                                  self.downloadTokens[song.id] == token else { return }
+                            self.downloadProgress[song.id] = 0.1 + fraction * 0.9
+                        }
+                    },
+                    completion: { [weak self] result in
+                        Task { @MainActor in
+                            self?.finishDownload(song: song, fileName: fileName, token: token, result: result)
+                        }
+                    }
                 )
-                self.downloads.insert(download, at: 0)
-                self.downloadProgress[song.id] = 1
-                self.downloadTasks[song.id] = nil
-                self.saveLibrary()
-                self.showToast("Downloaded \(song.title)")
+                self.downloaders[song.id] = downloader
+                downloader.start(request)
             } catch {
+                guard self.downloadTokens[song.id] == token,
+                      self.downloadCandidates[song.id] != nil else { return }
                 self.downloadErrors[song.id] = error.localizedDescription
                 self.downloadProgress[song.id] = nil
-                self.downloadTasks[song.id] = nil
                 self.showToast("Download failed")
             }
         }
-        downloadTasks[song.id] = task
+    }
+
+    private func finishDownload(song: Song, fileName: String, token: UUID, result: Result<Int64, Error>) {
+        guard downloadTokens[song.id] == token else { return }
+        downloaders[song.id] = nil
+        downloadTokens[song.id] = nil
+        switch result {
+        case .success(let bytes):
+            let download = Download(
+                song: song,
+                fileName: fileName,
+                quality: settings.downloadQuality.rawValue,
+                bytes: bytes,
+                createdAt: Date()
+            )
+            downloads.insert(download, at: 0)
+            downloadProgress[song.id] = nil
+            downloadErrors[song.id] = nil
+            downloadCandidates[song.id] = nil
+            downloadTokens[song.id] = nil
+            saveLibrary()
+            showToast("Downloaded \(song.title)")
+        case .failure(let error):
+            downloadProgress[song.id] = nil
+            if (error as? URLError)?.code == .cancelled {
+                downloadCandidates[song.id] = nil
+                downloadErrors[song.id] = nil
+                return
+            }
+            downloadErrors[song.id] = error.localizedDescription
+            showToast("Download failed")
+        }
     }
 
     func cancelDownload(_ song: Song) {
-        downloadTasks[song.id]?.cancel()
-        downloadTasks[song.id] = nil
+        downloaders[song.id]?.cancel()
+        downloaders[song.id] = nil
+        downloadTokens[song.id] = nil
         downloadProgress[song.id] = nil
+        downloadErrors[song.id] = nil
+        downloadCandidates[song.id] = nil
+    }
+
+    func clearDownloadFailure(_ song: Song) {
+        downloadErrors[song.id] = nil
+        downloadCandidates[song.id] = nil
     }
 
     func deleteDownload(_ download: Download) {
@@ -420,6 +644,11 @@ final class AppStore: ObservableObject {
         try? FileManager.default.removeItem(at: url)
         downloads.removeAll { $0.song.id == download.song.id }
         downloadProgress[download.song.id] = nil
+        downloadErrors[download.song.id] = nil
+        downloadCandidates[download.song.id] = nil
+        downloaders[download.song.id]?.cancel()
+        downloaders[download.song.id] = nil
+        downloadTokens[download.song.id] = nil
         saveLibrary()
     }
 
@@ -428,7 +657,15 @@ final class AppStore: ObservableObject {
             let url = MochyFiles.downloadsDirectory.appendingPathComponent(download.fileName)
             try? FileManager.default.removeItem(at: url)
         }
+        for downloader in downloaders.values {
+            downloader.cancel()
+        }
+        downloaders = [:]
+        downloadTokens = [:]
         downloads = []
+        downloadProgress = [:]
+        downloadErrors = [:]
+        downloadCandidates = [:]
         saveLibrary()
     }
 

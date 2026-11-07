@@ -259,11 +259,11 @@ enum SearchFilter: String, CaseIterable, Identifiable, Hashable {
     var params: String? {
         switch self {
         case .all: return nil
-        case .songs: return "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
-        case .videos: return "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D"
-        case .albums: return "EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D"
-        case .artists: return "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D"
-        case .playlists: return "EgWKAQIoAWoKEAkQChAFEAMQBA%3D%3D"
+        case .songs: return "EgWKAQIIAWoKEAkQBRAKEAMQBA=="
+        case .videos: return "EgWKAQIQAWoKEAkQChAFEAMQBA=="
+        case .albums: return "EgWKAQIYAWoKEAkQChAFEAMQBA=="
+        case .artists: return "EgWKAQIgAWoKEAkQChAFEAMQBA=="
+        case .playlists: return "EgWKAQIoAWoKEAkQChAFEAMQBA=="
         }
     }
 }
@@ -300,8 +300,13 @@ final class InnerTubeAPI {
     private let session: URLSession
     private let defaults = UserDefaults.standard
 
-    var contentLanguage = "en"
-    var contentRegion = "US"
+    private(set) var contentLanguage = "en"
+    private(set) var contentRegion = "US"
+
+    func configure(settings: AppSettings) {
+        contentLanguage = settings.contentLanguage
+        contentRegion = settings.contentRegion
+    }
 
     private(set) var visitorData: String? {
         didSet {
@@ -329,7 +334,7 @@ final class InnerTubeAPI {
             "browseId": "FEmusic_home"
         ])
 
-        var chips: [String] = []
+        var chips: [HomeChip] = []
         if let chipList = response.dig(
             "contents",
             "singleColumnBrowseResultsRenderer",
@@ -343,8 +348,16 @@ final class InnerTubeAPI {
                 "chipCloudRenderer",
                 "chips"
             ) as? [JSON] {
-                chips = header.compactMap {
-                    firstRun($0.dig("chipCloudChipRenderer", "text"))
+                chips = header.compactMap { raw in
+                    guard let chip = obj(raw["chipCloudChipRenderer"]) else { return nil }
+                    let title = firstRun(chip["text"]) ?? ""
+                    guard !title.isEmpty else { return nil }
+                    let browse = obj(chip["navigationEndpoint"])?["browseEndpoint"].flatMap { obj($0) }
+                    return HomeChip(
+                        title: title,
+                        browseId: browse?["browseId"] as? String,
+                        params: browse?["params"] as? String
+                    )
                 }
             }
         }
@@ -612,7 +625,7 @@ final class InnerTubeAPI {
 
     func stream(videoId: String, quality: AudioQuality) async throws -> PlaybackSource {
         try await ensureVisitorData()
-        let clients: [InnerTubeClient] = [.visionOS, .androidMusic, .iOS, .webRemix]
+        let clients: [InnerTubeClient] = [.iOS, .visionOS, .androidMusic, .webRemix]
         var lastReason = "This track is unavailable."
 
         for client in clients {
@@ -766,6 +779,7 @@ final class InnerTubeAPI {
         request.setValue("https://music.youtube.com", forHTTPHeaderField: "Origin")
         request.setValue("https://music.youtube.com/", forHTTPHeaderField: "Referer")
         request.setValue("\(contentLanguage)-\(contentRegion)", forHTTPHeaderField: "X-Goog-Language")
+        request.setValue("\(contentLanguage)-\(contentRegion),\(contentLanguage);q=0.9", forHTTPHeaderField: "Accept-Language")
         if let visitorData {
             request.setValue(visitorData, forHTTPHeaderField: "X-Goog-Visitor-Id")
         }
@@ -840,7 +854,7 @@ final class InnerTubeAPI {
         }) else {
             return []
         }
-        return parseSections(contents, includeResponsive: false)
+        return parseSections(contents, includeResponsive: true)
     }
 
     private func parseSections(_ contents: [Any], includeResponsive: Bool) -> [HomeSection] {
@@ -852,6 +866,7 @@ final class InnerTubeAPI {
                 let title = firstRun(header?["title"]) ?? ""
                 let label = firstRun(header?["strapline"])
                 let more = header?.dig("moreContentButton", "buttonRenderer", "navigationEndpoint", "browseEndpoint", "browseId") as? String
+                let moreParams = header?.dig("moreContentButton", "buttonRenderer", "navigationEndpoint", "browseEndpoint", "params") as? String
                 guard let rawItems = carousel["contents"] as? [Any] else { continue }
                 var items: [MediaItem] = []
                 for raw in rawItems {
@@ -864,7 +879,7 @@ final class InnerTubeAPI {
                     }
                 }
                 if !items.isEmpty {
-                    sections.append(HomeSection(id: "carousel-\(index)-\(title)", title: title, subtitle: label, items: items, moreId: more))
+                    sections.append(HomeSection(id: "carousel-\(index)-\(title)", title: title, subtitle: label, items: items, moreId: more, moreParams: moreParams))
                 }
             } else if let shelf = obj(dictionary["musicShelfRenderer"]) {
                 let title = firstRun(shelf["title"]) ?? (includeResponsive ? "Music" : "")
@@ -876,7 +891,8 @@ final class InnerTubeAPI {
                 }
                 if !items.isEmpty && !title.isEmpty {
                     let more = shelf.dig("moreContentButton", "buttonRenderer", "navigationEndpoint", "browseEndpoint", "browseId") as? String
-                    sections.append(HomeSection(id: "shelf-\(index)-\(title)", title: title, subtitle: nil, items: items, moreId: more))
+                    let moreParams = shelf.dig("moreContentButton", "buttonRenderer", "navigationEndpoint", "browseEndpoint", "params") as? String
+                    sections.append(HomeSection(id: "shelf-\(index)-\(title)", title: title, subtitle: nil, items: items, moreId: more, moreParams: moreParams))
                 }
             }
         }

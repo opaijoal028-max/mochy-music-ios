@@ -71,22 +71,35 @@ struct QueueSheet: View {
                                     .tracking(1.3)
                                     .foregroundStyle(palette.tertiaryText)
                                 Spacer()
-                                Text("\(upNext.count) songs")
+                                Text(upNext.count == 1 ? "1 song" : "\(upNext.count) songs")
                                     .font(MochyFont.medium(10))
                                     .foregroundStyle(palette.tertiaryText)
                             }
-                            ForEach(Array(upNext.enumerated()), id: \.element.id) { offset, song in
-                                queueRow(song, isCurrent: false, index: player.currentIndex + 1 + offset)
+                            ForEach(Array(upNext.enumerated()), id: \.offset) { offset, song in
+                                let index = player.currentIndex + 1 + offset
+                                queueRow(song, isCurrent: false, index: index)
+                                    .contextMenu {
+                                        Button {
+                                            player.jumpToQueueItem(index)
+                                        } label: {
+                                            Label("Play now", systemImage: "play.fill")
+                                        }
+                                        Button(role: .destructive) {
+                                            player.removeFromQueue(song)
+                                        } label: {
+                                            Label("Remove from queue", systemImage: "minus.circle")
+                                        }
+                                    }
                             }
                         }
                         .padding(.horizontal, 18)
                     }
 
-                    if player.queue.count > 0 {
+                    if !upNext.isEmpty {
                         Button(role: .destructive) {
-                            player.removeFromQueue(at: IndexSet(integersIn: 0..<player.queue.count))
+                            player.clearUpNext()
                         } label: {
-                            Text("Clear queue")
+                            Text("Clear up next")
                                 .font(MochyFont.semibold(13))
                                 .foregroundStyle(Color(hex: "#F06A6A"))
                                 .frame(maxWidth: .infinity)
